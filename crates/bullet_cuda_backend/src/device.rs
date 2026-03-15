@@ -110,11 +110,16 @@ impl Device for CudaDevice {
         let blas = CudaBlas::new(stream.clone()).map_err(CudaError::Blas)?;
 
         static KERNELS: &str = include_str!("kernels.cu");
-        let ptx = nvrtc::compile_ptx(KERNELS).map_err(CudaError::RuntimeCompile)?;
+        let opts = nvrtc::CompileOptions {
+            use_fast_math: Some(true),
+            arch: Some("sm_50"),
+            ..Default()::default()
+        };
+        let ptx = nvrtc::compile_ptx_with_opts(KERNELS, opts).map_err(CudaError::RuntimeCompile)?;
 
         let module = ctx.load_module(ptx).map_err(CudaError::Driver)?;
 
-        let ones = Mutex::new(stream.alloc_zeros::<f32>(0).map_err(CudaError::Driver)?);
+        let ones = Mutex::new(unsafe { stream.upgrade_device_ptr::<f32>(0, 0) });
 
         Ok(Self { stream, blas, module, copystream, ones })
     }

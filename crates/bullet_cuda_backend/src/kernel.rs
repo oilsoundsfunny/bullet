@@ -24,7 +24,13 @@ impl Kernel {
     /// # Safety
     /// Must ensure that kernel will soundly execute with given args (which will be checked).
     pub unsafe fn new(name: String, code: String, args: KernelArgs) -> Result<Self, OperationError<CudaError>> {
-        let ptx = nvrtc::compile_ptx(&code).map_err(CudaError::RuntimeCompile)?;
+        let opts = nvrtc::CompileOptions {
+            use_fast_math: Some(true),
+            arch: Some("sm_50"),
+            ..Default::default()
+        };
+        let ptx = nvrtc::compile_ptx_with_opts(&code, opts).map_err(CudaError::RuntimeCompile)?;
+
         let concrete = args.concretify()?;
         let module = concrete.device.stream().context().load_module(ptx).map_err(CudaError::Driver)?;
         let func = module.load_function("kernel").map_err(CudaError::Driver)?;
