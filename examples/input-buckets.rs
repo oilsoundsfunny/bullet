@@ -14,7 +14,12 @@ use bullet_lib::{
         schedule::{
             TrainingSchedule,
             TrainingSteps,
-            lr::{CosineDecayLR as CosLr, LinearDecayLR as LinearLr, LrScheduler},
+            lr::{
+                CosineDecayLR as CosLr,
+                ExponentialDecayLR as ExpLr,
+                LinearDecayLR as LinearLr,
+                LrScheduler,
+            },
             wdl::{ConstantWDL as ConstWdl, LinearWDL as LinearWdl, Sequence as WdlSequence},
         },
         settings::LocalSettings,
@@ -34,6 +39,66 @@ impl OutputBuckets<ChessBoard> for CjBuckets {
         let p = pos.occ().count_ones();
         let n = (63 - p) * (32 - p);
         n.div(225).min(7) as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WarmupStableDecayLr {
+    pub min_lr: f32,
+    pub max_lr: f32,
+    pub warmup_pct: f32,
+    pub decay_pct: f32,
+    pub final_superbatch: usize,
+}
+
+impl WarmupStableDecayLr {
+    fn warmup_sb(&self) -> usize {
+        (self.final_superbatch as f32 * self.warmup_pct) as usize
+    }
+
+    fn stable_sb(&self) -> usize {
+        self.final_superbatch - self.warmup_sb() - self.decay_sb()
+    }
+
+    fn decay_sb(&self) -> usize {
+        (self.final_superbatch as f32 * self.decay_pct) as usize
+    }
+}
+
+impl LrScheduler for WarmupStableDecayLr {
+    fn lr(&self, batch: usize, sb: usize) -> f32 {
+        let warmup = self.warmup_sb();
+        let stable = self.stable_sb();
+        let decay = self.decay_sb();
+
+        if sb <= warmup {
+            let inner = LinearLr {
+                initial_lr: self.min_lr,
+                final_lr: self.max_lr,
+                final_superbatch: warmup * BATCHES,
+            };
+            inner.lr(1, (sb - 1) * BATCHES + batch)
+        } else if sb <= warmup + stable {
+            self.max_lr
+        } else {
+            let inner = ExpLr {
+                initial_lr: self.max_lr,
+                final_lr: self.min_lr,
+                final_superbatch: decay * BATCHES,
+            };
+            inner.lr(1, (sb - warmup - stable - 1) * BATCHES + batch)
+        }
+    }
+
+    fn colourful(&self) -> String {
+        format!(
+            "wsd(min = {}, max = {}, warmup = {} sb, stable = {} sb, decay = {} sb)",
+            ansi(self.min_lr, 31),
+            ansi(self.max_lr, 31),
+            ansi(self.warmup_sb(), 31),
+            ansi(self.stable_sb(), 31),
+            ansi(self.decay_sb(), 31),
+        )
     }
 }
 

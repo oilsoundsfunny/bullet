@@ -113,7 +113,7 @@ impl Device for CudaDevice {
         let opts = nvrtc::CompileOptions {
             use_fast_math: Some(true),
             arch: Some("sm_50"),
-            ..Default()::default()
+            ..Default::default()
         };
         let ptx = nvrtc::compile_ptx_with_opts(KERNELS, opts).map_err(CudaError::RuntimeCompile)?;
 
