@@ -14,13 +14,8 @@ use bullet_lib::{
         schedule::{
             TrainingSchedule,
             TrainingSteps,
-            lr::{
-                CosineDecayLR as CosLr,
-                ExponentialDecayLR as ExpLr,
-                LinearDecayLR as LinearLr,
-                LrScheduler,
-            },
-            wdl::{ConstantWDL as ConstWdl, LinearWDL as LinearWdl, Sequence as WdlSequence},
+            lr::{CosineDecayLR as CosLr, LinearDecayLR as LinearLr, LrScheduler},
+            wdl::{ConstantWDL as ConstWdl, Sequence as WdlSequence},
         },
         settings::LocalSettings,
     },
@@ -39,66 +34,6 @@ impl OutputBuckets<ChessBoard> for CjBuckets {
         let p = pos.occ().count_ones();
         let n = (63 - p) * (32 - p);
         n.div(225).min(7) as u8
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct WarmupStableDecayLr {
-    pub min_lr: f32,
-    pub max_lr: f32,
-    pub warmup_pct: f32,
-    pub decay_pct: f32,
-    pub final_superbatch: usize,
-}
-
-impl WarmupStableDecayLr {
-    fn warmup_sb(&self) -> usize {
-        (self.final_superbatch as f32 * self.warmup_pct) as usize
-    }
-
-    fn stable_sb(&self) -> usize {
-        self.final_superbatch - self.warmup_sb() - self.decay_sb()
-    }
-
-    fn decay_sb(&self) -> usize {
-        (self.final_superbatch as f32 * self.decay_pct) as usize
-    }
-}
-
-impl LrScheduler for WarmupStableDecayLr {
-    fn lr(&self, batch: usize, sb: usize) -> f32 {
-        let warmup = self.warmup_sb();
-        let stable = self.stable_sb();
-        let decay = self.decay_sb();
-
-        if sb <= warmup {
-            let inner = LinearLr {
-                initial_lr: self.min_lr,
-                final_lr: self.max_lr,
-                final_superbatch: warmup * BATCHES,
-            };
-            inner.lr(1, (sb - 1) * BATCHES + batch)
-        } else if sb <= warmup + stable {
-            self.max_lr
-        } else {
-            let inner = ExpLr {
-                initial_lr: self.max_lr,
-                final_lr: self.min_lr,
-                final_superbatch: decay * BATCHES,
-            };
-            inner.lr(1, (sb - warmup - stable - 1) * BATCHES + batch)
-        }
-    }
-
-    fn colourful(&self) -> String {
-        format!(
-            "wsd(min = {}, max = {}, warmup = {} sb, stable = {} sb, decay = {} sb)",
-            ansi(self.min_lr, 31),
-            ansi(self.max_lr, 31),
-            ansi(self.warmup_sb(), 31),
-            ansi(self.stable_sb(), 31),
-            ansi(self.decay_sb(), 31),
-        )
     }
 }
 
@@ -188,7 +123,7 @@ impl LrScheduler for OneCycleLr {
     }
 }
 
-const HL_SIZE: usize = 512;
+const HL_SIZE: usize = 1024;
 #[rustfmt::skip]
 const INPUT_BUCKETS: [usize; 32] = [
      0,  1,  2,  3,
@@ -203,9 +138,9 @@ const INPUT_BUCKETS: [usize; 32] = [
 const INPUT_BUCKETS_NUM: usize = get_num_buckets(&INPUT_BUCKETS);
 const OUTPUT_BUCKETS_NUM: usize = CjBuckets::BUCKETS;
 
-const BATCH_SIZE: usize = 16384 * 8;
+const BATCH_SIZE: usize = 16384 * 4;
 const BATCHES: usize = 16384 * 6144 / BATCH_SIZE;
-const SUPERBATCHES: usize = 100;
+const SUPERBATCHES: usize = 200;
 const CHECKPOINT: usize = 0;
 
 const QA: i16 = 255;
@@ -244,13 +179,11 @@ fn piece_count_acceptance(board: &Board) -> f64 {
     let d = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
 
     let f = n as f64 / d as f64;
-    0.5 * TARGET_DISTR[pc] / f
+    (0.5 * TARGET_DISTR[pc] / f).clamp(0., 1.)
 }
 
 fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     let default_filter = Filter {
-        min_ply: 8,
-        min_pieces: 3,
         max_eval: 32000,
         random_fen_skipping: true,
         random_fen_skip_probability: 0.05,
@@ -315,16 +248,16 @@ fn main() {
         div: 25.0,
         final_div: 10000.0,
         warmup_pct: 0.3,
-        anneal_cos: false,
+        anneal_cos: true,
         three_phase: true,
         final_superbatch: SUPERBATCHES,
     };
 
     let wdl_scheduler = WdlSequence {
         first: WdlSequence {
-            first: ConstWdl { value: 0.375 },
+            first: ConstWdl { value: 0.125 },
             first_scheduler_final_superbatch: lr_scheduler.warmup_sb(),
-            second: LinearWdl { start: 0.375, end: 0.875 }
+            second: LinearWdl { start: 0.125, end: 0.875 },
         },
         first_scheduler_final_superbatch: lr_scheduler.warmup_sb() + lr_scheduler.annealing_sb(),
         second: ConstWdl { value: 0.875 },
@@ -341,7 +274,7 @@ fn main() {
         },
         wdl_scheduler: wdl_scheduler,
         lr_scheduler: lr_scheduler,
-        save_rate: SUPERBATCHES / 10,
+        save_rate: SUPERBATCHES / 20,
     };
 
     let settings = LocalSettings {
