@@ -15,7 +15,7 @@ use bullet_lib::{
             TrainingSchedule,
             TrainingSteps,
             lr::{CosineDecayLR as CosLr, LinearDecayLR as LinearLr, LrScheduler},
-            wdl::{ConstantWDL as ConstWdl, Sequence as WdlSequence},
+            wdl::{ConstantWDL as ConstWdl, LinearWDL as LinearWdl, Sequence as WdlSequence},
         },
         settings::LocalSettings,
     },
@@ -255,12 +255,12 @@ fn main() {
 
     let wdl_scheduler = WdlSequence {
         first: WdlSequence {
-            first: ConstWdl { value: 0.125 },
+            first: ConstWdl { value: 0.5 },
             first_scheduler_final_superbatch: lr_scheduler.warmup_sb(),
-            second: LinearWdl { start: 0.125, end: 0.875 },
+            second: LinearWdl { start: 0.625, end: 0.875 },
         },
         first_scheduler_final_superbatch: lr_scheduler.warmup_sb() + lr_scheduler.annealing_sb(),
-        second: ConstWdl { value: 0.875 },
+        second: ConstWdl { value: 1.0 },
     };
 
     let schedule = TrainingSchedule {
@@ -285,7 +285,7 @@ fn main() {
     };
 
     let dataloader = {
-        let path = "data/dfrc5ksn-mar26.vf";
+        let path = "dfrc.vf";
         let buffer_size = 1024;
         let threads = 2;
         ViriBinpackLoader::new(&path, buffer_size, threads, ViriFilter::Custom(filter))
