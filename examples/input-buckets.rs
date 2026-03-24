@@ -285,7 +285,7 @@ fn main() {
     };
 
     let dataloader = {
-        let path = "dfrc.vf";
+        let path = "data/dfrc.vf";
         let buffer_size = 1024;
         let threads = 2;
         ViriBinpackLoader::new(&path, buffer_size, threads, ViriFilter::Custom(filter))
