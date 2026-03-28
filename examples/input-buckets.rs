@@ -138,7 +138,7 @@ const INPUT_BUCKETS: [usize; 32] = [
 const INPUT_BUCKETS_NUM: usize = get_num_buckets(&INPUT_BUCKETS);
 const OUTPUT_BUCKETS_NUM: usize = CjBuckets::BUCKETS;
 
-const BATCH_SIZE: usize = 16384 * 4;
+const BATCH_SIZE: usize = 16384 * 8;
 const BATCHES: usize = 16384 * 6144 / BATCH_SIZE;
 const SUPERBATCHES: usize = 200;
 const CHECKPOINT: usize = 0;
@@ -248,16 +248,16 @@ fn main() {
         div: 25.0,
         final_div: 10000.0,
         warmup_pct: 0.3,
-        anneal_cos: true,
+        anneal_cos: false,
         three_phase: true,
         final_superbatch: SUPERBATCHES,
     };
 
     let wdl_scheduler = WdlSequence {
         first: WdlSequence {
-            first: ConstWdl { value: 0.5 },
+            first: ConstWdl { value: 0.25 },
             first_scheduler_final_superbatch: lr_scheduler.warmup_sb(),
-            second: LinearWdl { start: 0.625, end: 0.875 },
+            second: LinearWdl { start: 0.375, end: 0.875 },
         },
         first_scheduler_final_superbatch: lr_scheduler.warmup_sb() + lr_scheduler.annealing_sb(),
         second: ConstWdl { value: 1.0 },
