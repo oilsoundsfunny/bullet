@@ -1,29 +1,43 @@
 use acyclib::trainer::logger::ansi;
-use bulletformat::ChessBoard;
 use bullet_lib::{
     game::{
-        inputs::{ChessBucketsMirrored, get_num_buckets},
+        inputs::{get_num_buckets, ChessBucketsMirrored},
         outputs::OutputBuckets,
     },
     nn::{
-        InitSettings, Shape,
         optimiser::{Ranger, RangerParams},
+        InitSettings, Shape,
     },
     trainer::{
         save::SavedFormat,
         schedule::{
-            TrainingSchedule,
-            TrainingSteps,
             lr::{CosineDecayLR as CosLr, LinearDecayLR as LinearLr, LrScheduler},
             wdl::{ConstantWDL as ConstWdl, LinearWDL as LinearWdl, Sequence as WdlSequence},
+            TrainingSchedule, TrainingSteps,
         },
         settings::LocalSettings,
     },
-    value::{ValueTrainerBuilder, loader::{ViriBinpackLoader, viribinpack::ViriFilter}},
+    value::{
+        loader::{viribinpack::ViriFilter, ViriBinpackLoader},
+        ValueTrainerBuilder,
+    },
 };
-use rand::{Rng, rng};
-use std::{mem::MaybeUninit, ops::Div, sync::atomic::{AtomicU64, Ordering}};
-use viriformat::{chess::{board::Board, chessmove::Move}, dataformat::{Filter, WDL as Result}};
+use bulletformat::ChessBoard;
+use rand::{rng, Rng};
+use std::{
+    mem::MaybeUninit,
+    ops::Div,
+    sync::atomic::{AtomicU64, Ordering},
+};
+use viriformat::{
+    chess::{
+        board::{movegen, Board},
+        chessmove::Move,
+        piece::PieceType,
+        squareset::SquareSet,
+    },
+    dataformat::{Filter, WDL as Result},
+};
 
 #[derive(Clone, Copy, Default)]
 pub struct CjBuckets;
@@ -66,7 +80,11 @@ impl OneCycleLr {
     }
 
     fn annihilation_sb(&self) -> usize {
-        if self.three_phase { self.final_superbatch - self.warmup_sb() * 2 } else { 0 }
+        if self.three_phase {
+            self.final_superbatch - self.warmup_sb() * 2
+        } else {
+            0
+        }
     }
 }
 
@@ -76,11 +94,8 @@ impl LrScheduler for OneCycleLr {
         let anneal = self.annealing_sb();
 
         if sb <= warmup {
-            let inner = CosLr {
-                initial_lr: self.initial_lr(),
-                final_lr: self.max_lr,
-                final_superbatch: warmup * BATCHES,
-            };
+            let inner =
+                CosLr { initial_lr: self.initial_lr(), final_lr: self.max_lr, final_superbatch: warmup * BATCHES };
             inner.lr(1, (sb - 1) * BATCHES + batch)
         } else if sb <= warmup + anneal && self.anneal_cos {
             let inner = CosLr {
@@ -123,6 +138,8 @@ impl LrScheduler for OneCycleLr {
     }
 }
 
+const SEE_PIECE_VALUES: [i32; 6] = [100, 300, 300, 500, 900, 0];
+
 const HL_SIZE: usize = 1024;
 #[rustfmt::skip]
 const INPUT_BUCKETS: [usize; 32] = [
@@ -146,6 +163,95 @@ const CHECKPOINT: usize = 0;
 const QA: i16 = 255;
 const QB: i16 = 64;
 const SCALE: f32 = 400.0;
+
+fn estimated_see(board: &Board, m: Move) -> i32 {
+    let mut value = board.piece_array[m.to()].map_or(0, |p| SEE_PIECE_VALUES[p.piece_type()]);
+
+    if let Some(promo) = m.promotion_type() {
+        value += SEE_PIECE_VALUES[promo] - SEE_PIECE_VALUES[PieceType::Pawn];
+    } else if m.is_ep() {
+        value = SEE_PIECE_VALUES[PieceType::Pawn];
+    }
+
+    value
+}
+
+fn static_exchange_eval(board: &Board, m: Move, threshold: i32) -> bool {
+    let from = m.from();
+    let to = m.to();
+    let bbs = &board.pieces;
+
+    let mut next_victim = m.promotion_type().unwrap_or_else(|| board.piece_array[from].unwrap().piece_type());
+
+    let mut balance = estimated_see(board, m) - threshold;
+
+    if balance < 0 {
+        return false;
+    }
+
+    balance -= SEE_PIECE_VALUES[next_victim];
+
+    if balance >= 0 {
+        return true;
+    }
+
+    let diag_sliders = bbs.pieces[PieceType::Queen] | bbs.pieces[PieceType::Bishop];
+    let orth_sliders = bbs.pieces[PieceType::Queen] | bbs.pieces[PieceType::Rook];
+
+    let mut occupied = bbs.occupied();
+    occupied ^= from.as_set();
+    occupied |= to.as_set();
+    if m.is_ep() {
+        occupied ^= board.ep_sq().unwrap().as_set();
+    }
+
+    let mut colour = board.turn().flip();
+
+    let mut attackers = bbs.all_attackers_to_sq(to, occupied);
+
+    loop {
+        let my_attackers = attackers & bbs.colours[colour];
+        if my_attackers == SquareSet::EMPTY {
+            break;
+        }
+
+        for victim in PieceType::all() {
+            next_victim = victim;
+            if (my_attackers & bbs.pieces[victim]) != SquareSet::EMPTY {
+                break;
+            }
+        }
+
+        fn isolate_lsb(s: SquareSet) -> SquareSet {
+            s & SquareSet::from_inner(s.inner().wrapping_neg())
+        }
+
+        occupied ^= isolate_lsb(my_attackers & bbs.pieces[next_victim]);
+
+        if next_victim == PieceType::Pawn || next_victim == PieceType::Bishop || next_victim == PieceType::Queen {
+            attackers |= movegen::bishop_attacks(to, occupied) & diag_sliders;
+        }
+
+        if next_victim == PieceType::Rook || next_victim == PieceType::Queen {
+            attackers |= movegen::rook_attacks(to, occupied) & orth_sliders;
+        }
+
+        attackers &= occupied;
+
+        colour = colour.flip();
+
+        balance = -balance - 1 - SEE_PIECE_VALUES[next_victim];
+
+        if balance >= 0 {
+            if next_victim == PieceType::King && (attackers & bbs.colours[colour]) != SquareSet::EMPTY {
+                colour = colour.flip();
+            }
+            break;
+        }
+    }
+
+    board.turn() != colour
+}
 
 fn piece_count_acceptance(board: &Board) -> f64 {
     #[rustfmt::skip]
@@ -185,8 +291,9 @@ fn piece_count_acceptance(board: &Board) -> f64 {
 fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     let default_filter = Filter {
         max_eval: 32000,
+        filter_tactical: false,
         random_fen_skipping: true,
-        random_fen_skip_probability: 0.05,
+        random_fen_skip_probability: 0.5,
         ..Default::default()
     };
     let wdl = match wdl {
@@ -197,7 +304,12 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     };
     let mut rng = rng();
 
+    fn see_filter(board: &Board, mv: Move) -> bool {
+        board.is_tactical(mv) && static_exchange_eval(board, mv, 0)
+    }
+
     !default_filter.should_filter(mv, eval as i32, board, wdl, &mut rng)
+        && !see_filter(board, mv)
         && rng.random_bool(piece_count_acceptance(board))
 }
 
@@ -235,11 +347,7 @@ fn main() {
             l1.forward(hl).select(output_buckets)
         });
 
-    let stricter_clipping = RangerParams {
-        min_weight: -0.99,
-        max_weight: 0.99,
-        ..Default::default()
-    };
+    let stricter_clipping = RangerParams { min_weight: -0.99, max_weight: 0.99, ..Default::default() };
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
@@ -254,11 +362,7 @@ fn main() {
     };
 
     let wdl_scheduler = WdlSequence {
-        first: WdlSequence {
-            first: ConstWdl { value: 0.25 },
-            first_scheduler_final_superbatch: lr_scheduler.warmup_sb(),
-            second: LinearWdl { start: 0.375, end: 0.875 },
-        },
+        first: LinearWdl { start: 0.125, end: 0.875 },
         first_scheduler_final_superbatch: lr_scheduler.warmup_sb() + lr_scheduler.annealing_sb(),
         second: ConstWdl { value: 1.0 },
     };
@@ -277,23 +381,17 @@ fn main() {
         save_rate: SUPERBATCHES / 20,
     };
 
-    let settings = LocalSettings {
-        threads: 2,
-        test_set: None,
-        output_directory: "checkpoints",
-        batch_queue_size: 32,
-    };
+    let settings = LocalSettings { threads: 2, test_set: None, output_directory: "checkpoints", batch_queue_size: 32 };
 
     let dataloader = {
-        let path = "data/dfrc.vf";
+        let path = "/k4/oil_data/dfrc.vf";
         let buffer_size = 1024;
-        let threads = 2;
+        let threads = 16;
         ViriBinpackLoader::new(&path, buffer_size, threads, ViriFilter::Custom(filter))
     };
 
     if CHECKPOINT > 0 {
-        let dir = format!("{}/{}-{}", settings.output_directory.to_string(), schedule.net_id, CHECKPOINT)
-            .to_string();
+        let dir = format!("{}/{}-{}", settings.output_directory.to_string(), schedule.net_id, CHECKPOINT).to_string();
         trainer.load_from_checkpoint(&dir);
     }
     trainer.run(&schedule, &settings, &dataloader);
