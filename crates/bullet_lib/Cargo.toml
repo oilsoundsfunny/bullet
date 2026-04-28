@@ -14,42 +14,15 @@ bullet-compiler = { workspace = true }
 bullet-gpu = { workspace = true }
 bullet-trainer = { workspace = true }
 bulletformat = "1.8.0"
-montyformat = "0.9.2"
+montyformat = "0.10.0"
+rand = "0.9.0"
 sfbinpack = "0.6.0"
-viriformat = "2.0.1"
+viriformat = "3.0.0"
 
 [features]
 cuda = ["bullet-gpu/cuda", "bullet-trainer/cuda"]
 rocm = ["bullet-gpu/rocm", "bullet-trainer/rocm"]
 
 [[example]]
-name = "simple"
-path = "../../examples/simple.rs"
-
-[[example]]
-name = "test1"
-path = "../../examples/tests/test1.rs"
-
-[[example]]
-name = "test2"
-path = "../../examples/tests/test2.rs"
-
-[[example]]
-name = "test3"
-path = "../../examples/tests/test3.rs"
-
-[[example]]
-name = "1_simple"
-path = "../../examples/progression/1_simple.rs"
-
-[[example]]
-name = "2_output_buckets"
-path = "../../examples/progression/2_output_buckets.rs"
-
-[[example]]
-name = "3_input_buckets"
-path = "../../examples/progression/3_input_buckets.rs"
-
-[[example]]
-name = "4_multi_layer"
-path = "../../examples/progression/4_multi_layer.rs"
+name = "moarlayers"
+path = "../../examples/moarlayers.rs"
